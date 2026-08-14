@@ -1,0 +1,43 @@
+name: Bug Monitor
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/20 * * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: discord-bug-monitor
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Restore encrypted runtime configuration
+        env:
+          CONFIG_B64: ${{ secrets.BUG_ENV_B64 }}
+        run: |
+          test -n "$CONFIG_B64"
+          mkdir -p .runtime
+          printf '%s' "$CONFIG_B64" | base64 --decode > .runtime/bug.env
+          chmod 600 .runtime/bug.env
+      - name: Check new Bugs
+        env:
+          BUG_STATELESS_LOOKBACK_MINUTES: "180"
+        run: |
+          for attempt in 1 2 3; do
+            python bug_monitor.py --env-file .runtime/bug.env --mode once && exit 0
+            if [ "$attempt" -lt 3 ]; then sleep $((attempt * 20)); fi
+          done
+          exit 1
+

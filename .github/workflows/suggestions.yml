@@ -1,0 +1,42 @@
+name: Suggestions Report
+
+on:
+  workflow_dispatch:
+  schedule:
+    # UTC 00:00-16:00 = Beijing 08:00-24:00.
+    - cron: "0 0-16 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: discord-suggestions-report
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Restore encrypted runtime configuration
+        env:
+          CONFIG_B64: ${{ secrets.SUGGESTIONS_ENV_B64 }}
+        run: |
+          test -n "$CONFIG_B64"
+          mkdir -p .runtime
+          printf '%s' "$CONFIG_B64" | base64 --decode > .runtime/suggestions.env
+          chmod 600 .runtime/suggestions.env
+      - name: Analyze Suggestions
+        run: |
+          slot_hour=$(TZ=Asia/Shanghai date +%-H)
+          for attempt in 1 2 3; do
+            python suggestions_report.py --env-file .runtime/suggestions.env --mode once --slot-hour "$slot_hour" && exit 0
+            if [ "$attempt" -lt 3 ]; then sleep $((attempt * 20)); fi
+          done
+          exit 1

@@ -1,0 +1,7 @@
+*.env
+.runtime/
+__pycache__/
+*.py[cod]
+*.log
+.bug_report_state.json*
+

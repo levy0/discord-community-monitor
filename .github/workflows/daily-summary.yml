@@ -1,0 +1,42 @@
+name: Daily Summary
+
+on:
+  workflow_dispatch:
+  schedule:
+    # UTC 10:00 = Beijing 18:00.
+    - cron: "0 10 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: discord-daily-summary
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Restore encrypted runtime configuration
+        env:
+          CONFIG_B64: ${{ secrets.DAILY_ENV_B64 }}
+        run: |
+          test -n "$CONFIG_B64"
+          mkdir -p .runtime
+          printf '%s' "$CONFIG_B64" | base64 --decode > .runtime/daily.env
+          chmod 600 .runtime/daily.env
+      - name: Send daily summary
+        run: |
+          report_date=$(TZ=Asia/Shanghai date +%F)
+          for attempt in 1 2 3; do
+            python daily_summary.py --env-file .runtime/daily.env --mode once --report-date "$report_date" && exit 0
+            if [ "$attempt" -lt 3 ]; then sleep $((attempt * 30)); fi
+          done
+          exit 1

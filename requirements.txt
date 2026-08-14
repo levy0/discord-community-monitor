@@ -1,0 +1,5 @@
+discord.py>=2.3,<3
+google-genai>=1.68,<2
+requests>=2.31,<3
+schedule>=1.2,<2
+

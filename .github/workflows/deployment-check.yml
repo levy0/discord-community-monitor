@@ -1,0 +1,42 @@
+name: Deployment Configuration Check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Restore encrypted runtime configurations
+        env:
+          BUG_ENV_B64: ${{ secrets.BUG_ENV_B64 }}
+          SUGGESTIONS_ENV_B64: ${{ secrets.SUGGESTIONS_ENV_B64 }}
+          LANGUAGE_ENV_B64: ${{ secrets.LANGUAGE_ENV_B64 }}
+          DAILY_ENV_B64: ${{ secrets.DAILY_ENV_B64 }}
+        run: |
+          test -n "$BUG_ENV_B64"
+          test -n "$SUGGESTIONS_ENV_B64"
+          test -n "$LANGUAGE_ENV_B64"
+          test -n "$DAILY_ENV_B64"
+          mkdir -p .runtime
+          printf '%s' "$BUG_ENV_B64" | base64 --decode > .runtime/bug.env
+          printf '%s' "$SUGGESTIONS_ENV_B64" | base64 --decode > .runtime/suggestions.env
+          printf '%s' "$LANGUAGE_ENV_B64" | base64 --decode > .runtime/language.env
+          printf '%s' "$DAILY_ENV_B64" | base64 --decode > .runtime/daily.env
+          chmod 600 .runtime/*.env
+      - name: Validate all four configurations without external requests
+        run: |
+          python bug_monitor.py --env-file .runtime/bug.env --check-config
+          python suggestions_report.py --env-file .runtime/suggestions.env --check-config
+          python language_channels_report.py --env-file .runtime/language.env --check-config
+          python daily_summary.py --env-file .runtime/daily.env --check-config
