@@ -3,10 +3,11 @@ name: Daily Summary
 on:
   workflow_dispatch:
   schedule:
-    # UTC 10:00 = Beijing 18:00.
-    - cron: "0 10 * * *"
+    # UTC 10:10 = Beijing 18:10; report boundary stays at 18:00.
+    - cron: "10 10 * * *"
 
 permissions:
+  actions: write
   contents: read
 
 concurrency:
@@ -33,10 +34,20 @@ jobs:
           printf '%s' "$CONFIG_B64" | base64 --decode > .runtime/daily.env
           chmod 600 .runtime/daily.env
       - name: Send daily summary
+        env:
+          DAILY_LAST_REPORTED_DATE: ${{ vars.DAILY_LAST_REPORTED_DATE }}
         run: |
-          report_date=$(TZ=Asia/Shanghai date +%F)
           for attempt in 1 2 3; do
-            python daily_summary.py --env-file .runtime/daily.env --mode once --report-date "$report_date" && exit 0
+            python daily_summary.py --env-file .runtime/daily.env --mode once --catch-up && exit 0
             if [ "$attempt" -lt 3 ]; then sleep $((attempt * 30)); fi
           done
           exit 1
+      - name: Persist last successful Daily Summary date
+        if: ${{ always() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -f .daily_summary_state.json ]; then
+            value=$(python -c "import json; print(json.load(open('.daily_summary_state.json', encoding='utf-8'))['last_reported_date'])")
+            gh variable set DAILY_LAST_REPORTED_DATE --body "$value"
+          fi

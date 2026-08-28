@@ -4,4 +4,6 @@ __pycache__/
 *.py[cod]
 *.log
 .bug_report_state.json*
-
+.suggestions_report_state.json*
+.language_report_state.json*
+.daily_summary_state.json*

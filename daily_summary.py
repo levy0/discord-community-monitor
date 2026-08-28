@@ -51,6 +51,8 @@ DEFAULT_SUGGESTION_CHANNEL_ID = 0
 DEFAULT_LANGUAGE_CHANNEL_IDS: tuple[int, ...] = ()
 WINDOWS_MUTEX_NAME = r"Local\DMG_Discord_Daily_Summary_Scheduler"
 _schedule_mutex_handle: int | None = None
+DAILY_STATE_PATH = Path(__file__).with_name(".daily_summary_state.json")
+LAST_REPORTED_DATE_ENV_NAME = "DAILY_LAST_REPORTED_DATE"
 
 
 def acquire_schedule_mutex() -> bool:
@@ -874,6 +876,83 @@ def manual_window_ending_now(
     return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
 
 
+def load_last_reported_date(
+    state_path: Path = DAILY_STATE_PATH,
+) -> date | None:
+    candidates: list[tuple[str, str]] = []
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+        candidates.append((str(state_path), str(payload["last_reported_date"])))
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        logger.warning("读取本地每日小结状态失败: %s", exc)
+
+    persisted = os.getenv(LAST_REPORTED_DATE_ENV_NAME, "").strip()
+    if persisted:
+        candidates.append((LAST_REPORTED_DATE_ENV_NAME, persisted))
+
+    for source, raw_value in candidates:
+        try:
+            value = date.fromisoformat(raw_value)
+            logger.info("从 %s 恢复最后已完成小结日期：%s", source, value)
+            return value
+        except Exception as exc:
+            logger.warning("忽略无效的每日小结状态 %s=%r: %s", source, raw_value, exc)
+    return None
+
+
+def save_last_reported_date(
+    report_date: date,
+    state_path: Path = DAILY_STATE_PATH,
+) -> None:
+    temp_path = state_path.with_name(state_path.name + ".tmp")
+    temp_path.write_text(
+        json.dumps({"last_reported_date": report_date.isoformat()}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    os.replace(temp_path, state_path)
+
+
+def latest_due_report_date(
+    cfg: Config,
+    now_local: datetime | None = None,
+) -> date:
+    tz = ZoneInfo(cfg.local_timezone)
+    current = now_local or datetime.now(tz)
+    current = current.astimezone(tz)
+    schedule_clock = datetime.strptime(cfg.daily_schedule_time, "%H:%M").time()
+    today_schedule = datetime.combine(current.date(), schedule_clock, tzinfo=tz)
+    return current.date() if current >= today_schedule else current.date() - timedelta(days=1)
+
+
+def pending_report_dates(
+    cfg: Config,
+    *,
+    now_local: datetime | None = None,
+) -> list[date]:
+    latest_due = latest_due_report_date(cfg, now_local)
+    last_reported = load_last_reported_date()
+    if last_reported is None:
+        logger.warning("没有持久化每日小结状态，仅补算最近一个应上报日期")
+        first_due = latest_due
+    else:
+        if last_reported > latest_due:
+            raise ValueError(
+                f"最后已完成日期 {last_reported} 晚于当前应完成日期 {latest_due}"
+            )
+        first_due = last_reported + timedelta(days=1)
+
+    if cfg.first_schedule_date:
+        first_due = max(first_due, cfg.first_schedule_date)
+    dates: list[date] = []
+    cursor = first_due
+    while cursor <= latest_due:
+        dates.append(cursor)
+        cursor += timedelta(days=1)
+    return dates
+
+
 class Pipeline:
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -935,31 +1014,44 @@ class Pipeline:
         )
 
 
+def run_pending_summaries(cfg: Config) -> None:
+    report_dates = pending_report_dates(cfg)
+    if not report_dates:
+        logger.info("没有待补发的每日小结，本轮不发送")
+        return
+    logger.info(
+        "本轮需处理 %d 个每日小结日期：%s",
+        len(report_dates),
+        ", ".join(item.isoformat() for item in report_dates),
+    )
+    pipeline = Pipeline(cfg)
+    for report_date in report_dates:
+        start_utc, end_utc = scheduled_window_for_date(cfg, report_date)
+        pipeline.run_window(start_utc=start_utc, end_utc=end_utc)
+        if not cfg.dry_run:
+            save_last_reported_date(report_date)
+
+
 def run_scheduled_job_safely(cfg: Config) -> None:
     try:
-        tz = ZoneInfo(cfg.local_timezone)
-        today = datetime.now(tz).date()
-        if cfg.first_schedule_date and today < cfg.first_schedule_date:
-            logger.info(
-                "今日 %s 早于首次调度日 %s，本次跳过",
-                today,
-                cfg.first_schedule_date,
-            )
-            return
-        start_utc, end_utc = scheduled_window_for_date(cfg, today)
-        Pipeline(cfg).run_window(start_utc=start_utc, end_utc=end_utc)
+        run_pending_summaries(cfg)
     except Exception:
         logger.exception("每日小结失败，本轮不推送，调度器会继续运行")
 
 
 def start_scheduler(cfg: Config) -> None:
     schedule.clear()
-    schedule.every().day.at(cfg.daily_schedule_time, cfg.local_timezone).do(
+    schedule_clock = datetime.strptime(cfg.daily_schedule_time, "%H:%M")
+    delayed_schedule_time = (
+        schedule_clock + timedelta(minutes=10)
+    ).strftime("%H:%M")
+    schedule.every().day.at(delayed_schedule_time, cfg.local_timezone).do(
         run_scheduled_job_safely, cfg
     )
     logger.info(
-        "每日小结调度已启动：%s 每天 %s，首次调度日=%s",
+        "每日小结调度已启动：%s 每天 %s 运行，统计边界保持 %s，首次调度日=%s",
         cfg.local_timezone,
+        delayed_schedule_time,
         cfg.daily_schedule_time,
         cfg.first_schedule_date or "立即生效",
     )
@@ -998,6 +1090,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="once 模式临时小结：18:00 前统计昨日 18:00 至当前时间",
     )
+    parser.add_argument(
+        "--catch-up",
+        action="store_true",
+        help="once 模式按持久化状态补齐所有尚未成功上报的日期",
+    )
     parser.add_argument("--dry-run", action="store_true", help="抓取并分析，但不发飞书")
     parser.add_argument("--check-config", action="store_true", help="只检查配置")
     return parser
@@ -1016,22 +1113,28 @@ def main() -> int:
             logger.info("每日小结配置校验通过；密钥值未输出")
             return 0
         if args.mode == "schedule":
-            if args.report_date is not None or args.end_now:
-                parser.error("--report-date/--end-now 只能与 --mode once 一起使用")
+            if args.report_date is not None or args.end_now or args.catch_up:
+                parser.error("--report-date/--end-now/--catch-up 只能与 --mode once 一起使用")
             if not acquire_schedule_mutex():
                 logger.warning("每日小结调度器已在运行，本次重复启动已退出")
                 return 0
             start_scheduler(cfg)
         else:
-            if args.report_date is not None and args.end_now:
-                parser.error("--report-date 和 --end-now 不能同时使用")
-            if args.end_now:
+            selected_modes = sum(
+                (args.report_date is not None, args.end_now, args.catch_up)
+            )
+            if selected_modes > 1:
+                parser.error("--report-date、--end-now 和 --catch-up 不能同时使用")
+            if args.catch_up:
+                run_pending_summaries(cfg)
+            elif args.end_now:
                 start_utc, end_utc = manual_window_ending_now(cfg)
+                Pipeline(cfg).run_window(start_utc=start_utc, end_utc=end_utc)
             else:
                 tz = ZoneInfo(cfg.local_timezone)
                 report_date = args.report_date or datetime.now(tz).date()
                 start_utc, end_utc = scheduled_window_for_date(cfg, report_date)
-            Pipeline(cfg).run_window(start_utc=start_utc, end_utc=end_utc)
+                Pipeline(cfg).run_window(start_utc=start_utc, end_utc=end_utc)
         return 0
     except KeyboardInterrupt:
         logger.info("用户中止")

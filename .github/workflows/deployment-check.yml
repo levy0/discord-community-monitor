@@ -4,6 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: write
   contents: read
 
 jobs:
@@ -40,3 +41,8 @@ jobs:
           python suggestions_report.py --env-file .runtime/suggestions.env --check-config
           python language_channels_report.py --env-file .runtime/language.env --check-config
           python daily_summary.py --env-file .runtime/daily.env --check-config
+          python -m unittest discover -s tests -v
+      - name: Verify state persistence permission
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh variable set DEPLOYMENT_CHECK_STATE --body "$GITHUB_SHA"

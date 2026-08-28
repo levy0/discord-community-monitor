@@ -3,10 +3,11 @@ name: Suggestions Report
 on:
   workflow_dispatch:
   schedule:
-    # UTC 00:00-16:00 = Beijing 08:00-24:00.
-    - cron: "0 0-16 * * *"
+    # UTC 00:10-14:10 = Beijing 08:10-22:10; report boundaries stay hourly.
+    - cron: "10 0-14 * * *"
 
 permissions:
+  actions: write
   contents: read
 
 concurrency:
@@ -33,10 +34,20 @@ jobs:
           printf '%s' "$CONFIG_B64" | base64 --decode > .runtime/suggestions.env
           chmod 600 .runtime/suggestions.env
       - name: Analyze Suggestions
+        env:
+          SUGGESTIONS_LAST_END_UTC: ${{ vars.SUGGESTIONS_LAST_END_UTC }}
         run: |
-          slot_hour=$(TZ=Asia/Shanghai date +%-H)
           for attempt in 1 2 3; do
-            python suggestions_report.py --env-file .runtime/suggestions.env --mode once --slot-hour "$slot_hour" && exit 0
+            python suggestions_report.py --env-file .runtime/suggestions.env --mode once && exit 0
             if [ "$attempt" -lt 3 ]; then sleep $((attempt * 20)); fi
           done
           exit 1
+      - name: Persist last successful Suggestions boundary
+        if: ${{ always() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -f .suggestions_report_state.json ]; then
+            value=$(python -c "import json; print(json.load(open('.suggestions_report_state.json', encoding='utf-8'))['last_report_end_utc'])")
+            gh variable set SUGGESTIONS_LAST_END_UTC --body "$value"
+          fi

@@ -625,33 +625,50 @@ def load_last_checked_at_utc(
     interval_minutes: int,
     state_path: Path = BUG_REPORT_STATE_PATH,
 ) -> datetime:
-    # GitHub-hosted runners use an ephemeral filesystem.  A wider overlap keeps
-    # delayed schedule runs from creating gaps; the Lark Source Message ID is
-    # still the source of truth and prevents duplicate Bug records/notices.
+    # GitHub-hosted runners use an ephemeral filesystem. The workflow persists
+    # this value in a GitHub Actions variable and injects it on the next run.
+    # A wide overlap remains as the emergency fallback; Lark Source Message ID
+    # is still the source of truth and prevents duplicate Bug records/notices.
     stateless_lookback_minutes = max(
         interval_minutes,
         int(os.getenv("BUG_STATELESS_LOOKBACK_MINUTES", str(interval_minutes))),
     )
     fallback = now_utc - timedelta(minutes=stateless_lookback_minutes)
+    state_values: list[tuple[str, str]] = []
     try:
         payload = json.loads(state_path.read_text(encoding="utf-8"))
-        value = datetime.fromisoformat(str(payload["last_checked_at_utc"]))
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
-        value = value.astimezone(timezone.utc)
-        if value > now_utc:
-            raise ValueError("上次检查时间晚于当前时间")
-        return value
+        state_values.append((str(state_path), str(payload["last_checked_at_utc"])))
     except FileNotFoundError:
+        pass
+    except Exception as exc:
+        logger.warning("读取本地 Bug 检查状态失败: %s", exc)
+
+    persisted_value = os.getenv("BUG_LAST_CHECKED_AT_UTC", "").strip()
+    if persisted_value:
+        state_values.append(("BUG_LAST_CHECKED_AT_UTC", persisted_value))
+
+    for source, raw_value in state_values:
+        try:
+            value = datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
+            value = value.astimezone(timezone.utc)
+            if value > now_utc:
+                raise ValueError("上次检查时间晚于当前时间")
+            logger.info("从 %s 恢复上次成功检查时间：%s", source, value.isoformat())
+            return value
+        except Exception as exc:
+            logger.warning("忽略无效的 Bug 检查状态 %s=%r: %s", source, raw_value, exc)
+
+    if not state_values:
         logger.info(
-            "尚无上次检查状态，查询范围暂按最近 %d 分钟计算",
+            "尚无持久化检查状态，查询范围暂按最近 %d 分钟计算",
             stateless_lookback_minutes,
         )
-    except Exception as exc:
-        logger.info(
-            "读取上次检查状态失败，查询范围暂按最近 %d 分钟计算: %s",
+    else:
+        logger.warning(
+            "没有可用的持久化检查状态，查询范围暂按最近 %d 分钟计算",
             stateless_lookback_minutes,
-            exc,
         )
     return fallback
 

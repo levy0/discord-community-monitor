@@ -3,9 +3,11 @@ name: Bug Monitor
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/20 * * * *"
+    # Run every 20 minutes away from the top-of-hour load peak.
+    - cron: "10,30,50 * * * *"
 
 permissions:
+  actions: write
   contents: read
 
 concurrency:
@@ -33,11 +35,20 @@ jobs:
           chmod 600 .runtime/bug.env
       - name: Check new Bugs
         env:
-          BUG_STATELESS_LOOKBACK_MINUTES: "180"
+          BUG_LAST_CHECKED_AT_UTC: ${{ vars.BUG_LAST_CHECKED_AT_UTC }}
+          BUG_STATELESS_LOOKBACK_MINUTES: "10080"
         run: |
           for attempt in 1 2 3; do
             python bug_monitor.py --env-file .runtime/bug.env --mode once && exit 0
             if [ "$attempt" -lt 3 ]; then sleep $((attempt * 20)); fi
           done
           exit 1
-
+      - name: Persist last successful Bug check
+        if: ${{ always() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -f .bug_report_state.json ]; then
+            value=$(python -c "import json; print(json.load(open('.bug_report_state.json', encoding='utf-8'))['last_checked_at_utc'])")
+            gh variable set BUG_LAST_CHECKED_AT_UTC --body "$value"
+          fi

@@ -7,14 +7,15 @@ Discord 多语言频道定时舆情摘要。
 - 合并读取 9 个 language channels，以一份报告统一分析；
 - 不读取或写入云文档；
 - 不做 P-Level，也不会 @任何人；
-- UTC+8 每天 08:00～次日 00:00 每个整点运行；
-- 08:00 汇总当天 00:00～08:00，其余整点汇总上一小时；
+- UTC+8 每天 08:10～22:10 运行，统计边界仍为 08:00～22:00 整点；
+- 08:00 汇总前一日 22:00～当日 08:00，其余时段从上次成功边界补齐；
 - Gemini 只输出“核心结论 / 主要议题 / 引述证据”三个模块；
-- 00:00～08:00 不发送；进程持续运行并等待下一个计划整点。
+- 22:10～次日 08:10 不发送；进程持续运行并等待下一个计划时段。
 """
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import re
@@ -42,7 +43,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger("discord_language_channels_summary")
 LANGUAGE_REPORT_TITLE = "【DMG】language channels频道分析"
-MIDNIGHT_SLOT_HOUR = 0
+REPORT_DELAY_MINUTES = 10
+REPORT_STATE_PATH = Path(__file__).with_name(".language_report_state.json")
+LAST_END_ENV_NAME = "LANGUAGE_LAST_END_UTC"
 WINDOWS_MUTEX_NAME = r"Local\DMG_Discord_Language_Channels_Scheduler"
 # Public deployment contains no community identifiers. Configure the complete
 # channel list through LANGUAGE_CHANNEL_IDS in the encrypted runtime secret.
@@ -183,8 +186,8 @@ class Config:
             request_timeout_seconds=env_float("REQUEST_TIMEOUT_SECONDS", 15.0),
             local_timezone=os.getenv("LOCAL_TIMEZONE", "Asia/Shanghai").strip(),
             schedule_start_hour=env_int("SCHEDULE_START_HOUR", 8),
-            schedule_end_hour=env_int("SCHEDULE_END_HOUR", 23),
-            overnight_start_hour=env_int("OVERNIGHT_START_HOUR", 0),
+            schedule_end_hour=env_int("SCHEDULE_END_HOUR", 22),
+            overnight_start_hour=env_int("OVERNIGHT_START_HOUR", 22),
             audience=os.getenv(
                 "LANGUAGE_CHANNELS_AUDIENCE",
                 os.getenv("SUGGESTION_AUDIENCE", "游戏项目组、运营与研发团队"),
@@ -227,8 +230,8 @@ class Config:
             raise ValueError("调度小时必须在 0～23 之间")
         if self.schedule_start_hour > self.schedule_end_hour:
             raise ValueError("SCHEDULE_START_HOUR 不能大于 SCHEDULE_END_HOUR")
-        if self.overnight_start_hour >= self.schedule_start_hour:
-            raise ValueError("OVERNIGHT_START_HOUR 必须早于 SCHEDULE_START_HOUR")
+        if self.overnight_start_hour == self.schedule_start_hour:
+            raise ValueError("OVERNIGHT_START_HOUR 不能等于 SCHEDULE_START_HOUR")
         if not 1 <= self.cluster_top_k <= 10:
             raise ValueError("CLUSTER_TOP_K 必须在 1～10 之间")
         if self.output_limit_chars < 300:
@@ -796,6 +799,57 @@ class Pipeline:
         logger.info("本轮 language channels 合并汇总完成")
 
 
+def parse_utc_datetime(raw_value: str) -> datetime:
+    value = datetime.fromisoformat(raw_value.strip().replace("Z", "+00:00"))
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def load_last_report_end_utc(
+    state_path: Path = REPORT_STATE_PATH,
+) -> datetime | None:
+    candidates: list[tuple[str, str]] = []
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+        candidates.append((str(state_path), str(payload["last_report_end_utc"])))
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        logger.warning("读取本地 language channels 状态失败: %s", exc)
+
+    persisted = os.getenv(LAST_END_ENV_NAME, "").strip()
+    if persisted:
+        candidates.append((LAST_END_ENV_NAME, persisted))
+
+    for source, raw_value in candidates:
+        try:
+            value = parse_utc_datetime(raw_value)
+            logger.info("从 %s 恢复上次成功统计边界：%s", source, value.isoformat())
+            return value
+        except Exception as exc:
+            logger.warning(
+                "忽略无效的 language channels 状态 %s=%r: %s",
+                source,
+                raw_value,
+                exc,
+            )
+    return None
+
+
+def save_last_report_end_utc(
+    end_utc: datetime,
+    state_path: Path = REPORT_STATE_PATH,
+) -> None:
+    value = end_utc.astimezone(timezone.utc).isoformat()
+    temp_path = state_path.with_name(state_path.name + ".tmp")
+    temp_path.write_text(
+        json.dumps({"last_report_end_utc": value}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    os.replace(temp_path, state_path)
+
+
 def scheduled_window_for_hour(
     cfg: Config,
     *,
@@ -803,12 +857,9 @@ def scheduled_window_for_hour(
     reference_local: datetime | None = None,
 ) -> tuple[datetime, datetime]:
     """返回某个 UTC+8 整点对应的精确、不重叠统计窗口。"""
-    if slot_hour != MIDNIGHT_SLOT_HOUR and not (
-        cfg.schedule_start_hour <= slot_hour <= cfg.schedule_end_hour
-    ):
+    if not cfg.schedule_start_hour <= slot_hour <= cfg.schedule_end_hour:
         raise ValueError(
-            f"slot_hour 必须为 0 或在 {cfg.schedule_start_hour}～"
-            f"{cfg.schedule_end_hour} 之间"
+            f"slot_hour 必须在 {cfg.schedule_start_hour}～{cfg.schedule_end_hour} 之间"
         )
     tz = ZoneInfo(cfg.local_timezone)
     reference = reference_local or datetime.now(tz)
@@ -822,6 +873,8 @@ def scheduled_window_for_hour(
 
     if slot_hour == cfg.schedule_start_hour:
         start_local = end_local.replace(hour=cfg.overnight_start_hour)
+        if start_local >= end_local:
+            start_local -= timedelta(days=1)
     else:
         start_local = end_local - timedelta(hours=1)
     return (
@@ -830,13 +883,55 @@ def scheduled_window_for_hour(
     )
 
 
-def latest_scheduled_hour(cfg: Config, now_local: datetime | None = None) -> int:
+def latest_due_end_utc(cfg: Config, now_local: datetime | None = None) -> datetime:
     tz = ZoneInfo(cfg.local_timezone)
     current = now_local or datetime.now(tz)
     current = current.astimezone(tz)
-    if current.hour < cfg.schedule_start_hour:
-        return MIDNIGHT_SLOT_HOUR
-    return current.hour
+    start_today = current.replace(
+        hour=cfg.schedule_start_hour,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+    end_today = current.replace(
+        hour=cfg.schedule_end_hour,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+    if current < start_today:
+        end_local = end_today - timedelta(days=1)
+    elif current >= end_today:
+        end_local = end_today
+    else:
+        end_local = current.replace(minute=0, second=0, microsecond=0)
+    return end_local.astimezone(timezone.utc)
+
+
+def catch_up_window(
+    cfg: Config,
+    *,
+    now_local: datetime | None = None,
+) -> tuple[datetime, datetime] | None:
+    end_utc = latest_due_end_utc(cfg, now_local)
+    last_end_utc = load_last_report_end_utc()
+    if last_end_utc is None:
+        end_local = end_utc.astimezone(ZoneInfo(cfg.local_timezone))
+        start_utc, _ = scheduled_window_for_hour(
+            cfg,
+            slot_hour=end_local.hour,
+            reference_local=end_local,
+        )
+        logger.warning("没有持久化 language channels 状态，仅补算最近一个计划窗口")
+        return start_utc, end_utc
+    if last_end_utc > end_utc:
+        raise ValueError(
+            f"上次成功统计边界 {last_end_utc.isoformat()} 晚于当前应统计边界 "
+            f"{end_utc.isoformat()}"
+        )
+    if last_end_utc == end_utc:
+        return None
+    return last_end_utc, end_utc
 
 
 def run_slot_safely(cfg: Config, *, slot_hour: int) -> None:
@@ -847,21 +942,35 @@ def run_slot_safely(cfg: Config, *, slot_hour: int) -> None:
         logger.exception("language channels 定时任务失败，调度器会继续运行；本轮不推送")
 
 
+def run_catch_up_safely(cfg: Config) -> None:
+    try:
+        window = catch_up_window(cfg)
+        if window is None:
+            logger.info("language channels 没有待补齐的统计窗口，本轮不发送")
+            return
+        start_utc, end_utc = window
+        Pipeline(cfg).run_window(start_utc=start_utc, end_utc=end_utc)
+        if not cfg.dry_run:
+            save_last_report_end_utc(end_utc)
+    except Exception:
+        logger.exception("language channels 补漏任务失败，调度器会继续运行；本轮不推送")
+
+
 def start_scheduler(cfg: Config) -> None:
     schedule.clear()
-    slot_hours = tuple(range(cfg.schedule_start_hour, cfg.schedule_end_hour + 1)) + (
-        MIDNIGHT_SLOT_HOUR,
-    )
-    for slot_hour in slot_hours:
+    for slot_hour in range(cfg.schedule_start_hour, cfg.schedule_end_hour + 1):
         schedule.every().day.at(
-            f"{slot_hour:02d}:00",
+            f"{slot_hour:02d}:{REPORT_DELAY_MINUTES:02d}",
             cfg.local_timezone,
-        ).do(run_slot_safely, cfg, slot_hour=slot_hour)
+        ).do(run_catch_up_safely, cfg)
     logger.info(
-        "UTC+8 调度已启动：每天 %02d:00～%02d:00 及次日 00:00 每个整点发送；"
-        "%02d:00 汇总当日 %02d:00 至 %02d:00；00:00～08:00 不发送",
+        "UTC+8 调度已启动：每天 %02d:%02d～%02d:%02d 运行；"
+        "统计边界保持整点，%02d:00 汇总前一日 %02d:00 至当日 %02d:00，"
+        "其余时段从上次成功边界自动补齐",
         cfg.schedule_start_hour,
+        REPORT_DELAY_MINUTES,
         cfg.schedule_end_hour,
+        REPORT_DELAY_MINUTES,
         cfg.schedule_start_hour,
         cfg.overnight_start_hour,
         cfg.schedule_start_hour,
@@ -894,7 +1003,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--slot-hour",
         type=int,
         default=None,
-        help="once 模式指定要模拟的整点（0 或 8～23）；默认最近一个计划整点",
+        help="once 模式手动指定单个整点；不指定时按持久化状态自动补漏",
     )
     parser.add_argument("--dry-run", action="store_true", help="完成抓取和 AI 分析，但不发群消息")
     parser.add_argument(
@@ -918,11 +1027,11 @@ def main() -> int:
         if args.check_config:
             logger.info("配置校验通过；密钥值未输出")
             return 0
-        if args.slot_hour is not None and args.slot_hour != MIDNIGHT_SLOT_HOUR and not (
+        if args.slot_hour is not None and not (
             cfg.schedule_start_hour <= args.slot_hour <= cfg.schedule_end_hour
         ):
             parser.error(
-                f"--slot-hour 必须为 0 或在 {cfg.schedule_start_hour}～"
+                f"--slot-hour 必须在 {cfg.schedule_start_hour}～"
                 f"{cfg.schedule_end_hour} 之间"
             )
         if args.mode == "schedule":
@@ -937,15 +1046,17 @@ def main() -> int:
                 return 0
             start_scheduler(cfg)
         else:
-            slot_hour = (
-                args.slot_hour
-                if args.slot_hour is not None
-                else latest_scheduled_hour(cfg)
-            )
-            start_utc, end_utc = scheduled_window_for_hour(
-                cfg,
-                slot_hour=slot_hour,
-            )
+            if args.slot_hour is None:
+                window = catch_up_window(cfg)
+                if window is None:
+                    logger.info("language channels 没有待补齐的统计窗口，本轮不发送")
+                    return 0
+                start_utc, end_utc = window
+            else:
+                start_utc, end_utc = scheduled_window_for_hour(
+                    cfg,
+                    slot_hour=args.slot_hour,
+                )
             if args.fetch_only:
                 records = asyncio.run(
                     fetch_language_messages(
@@ -964,6 +1075,8 @@ def main() -> int:
                 )
             else:
                 Pipeline(cfg).run_window(start_utc=start_utc, end_utc=end_utc)
+                if args.slot_hour is None and not cfg.dry_run:
+                    save_last_report_end_utc(end_utc)
         return 0
     except KeyboardInterrupt:
         logger.info("用户中止")
