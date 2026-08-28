@@ -7,8 +7,7 @@ on:
     - cron: "10 0-14 * * *"
 
 permissions:
-  actions: write
-  contents: read
+  contents: write
 
 concurrency:
   group: discord-language-report
@@ -33,9 +32,11 @@ jobs:
           mkdir -p .runtime
           printf '%s' "$CONFIG_B64" | base64 --decode > .runtime/language.env
           chmod 600 .runtime/language.env
+      - name: Restore last successful Language boundary
+        run: |
+          git fetch --no-tags --depth=1 origin state-language
+          git show FETCH_HEAD:.language_report_state.json > .language_report_state.json
       - name: Analyze General and language channels
-        env:
-          LANGUAGE_LAST_END_UTC: ${{ vars.LANGUAGE_LAST_END_UTC }}
         run: |
           for attempt in 1 2 3; do
             python language_channels_report.py --env-file .runtime/language.env --mode once && exit 0
@@ -44,10 +45,17 @@ jobs:
           exit 1
       - name: Persist last successful Language boundary
         if: ${{ always() }}
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           if [ -f .language_report_state.json ]; then
-            value=$(python -c "import json; print(json.load(open('.language_report_state.json', encoding='utf-8'))['last_report_end_utc'])")
-            gh variable set LANGUAGE_LAST_END_UTC --body "$value"
+            cp .language_report_state.json "$RUNNER_TEMP/language-state.json"
+            git config user.name github-actions[bot]
+            git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+            git fetch --no-tags --depth=1 origin state-language
+            git checkout --detach --force FETCH_HEAD
+            cp "$RUNNER_TEMP/language-state.json" .language_report_state.json
+            git add -f .language_report_state.json
+            if ! git diff --cached --quiet; then
+              git commit -m "Update Language report state"
+              git push origin HEAD:state-language
+            fi
           fi

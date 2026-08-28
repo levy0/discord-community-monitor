@@ -22,11 +22,11 @@ Secrets 的内容是对应 `.env` 文件经过 Base64 编码后的文本。工�
 
 四个工作流均支持在 GitHub Actions 页面手动执行。定时触发避开每小时第 0 分钟的高负载时段；即使 GitHub 延迟或漏掉某次触发，下一次成功运行也会从持久化的上次成功边界继续补齐。
 
-四项状态分别保存在 GitHub Actions Variables：
+四项状态分别保存在独立的 GitHub 状态分支；分支中只有时间戳，没有 Discord 消息或密钥：
 
-- `BUG_LAST_CHECKED_AT_UTC`
-- `SUGGESTIONS_LAST_END_UTC`
-- `LANGUAGE_LAST_END_UTC`
-- `DAILY_LAST_REPORTED_DATE`
+- `state-bug`
+- `state-suggestions`
+- `state-language`
+- `state-daily`
 
 Bug 工作流在变量缺失时使用 7 天紧急回看窗口；Lark 表格里的 `Source Message ID` 负责去重，不会重复写入同一 Bug。

@@ -7,8 +7,7 @@ on:
     - cron: "10 10 * * *"
 
 permissions:
-  actions: write
-  contents: read
+  contents: write
 
 concurrency:
   group: discord-daily-summary
@@ -33,9 +32,11 @@ jobs:
           mkdir -p .runtime
           printf '%s' "$CONFIG_B64" | base64 --decode > .runtime/daily.env
           chmod 600 .runtime/daily.env
+      - name: Restore last successful Daily Summary date
+        run: |
+          git fetch --no-tags --depth=1 origin state-daily
+          git show FETCH_HEAD:.daily_summary_state.json > .daily_summary_state.json
       - name: Send daily summary
-        env:
-          DAILY_LAST_REPORTED_DATE: ${{ vars.DAILY_LAST_REPORTED_DATE }}
         run: |
           for attempt in 1 2 3; do
             python daily_summary.py --env-file .runtime/daily.env --mode once --catch-up && exit 0
@@ -44,10 +45,17 @@ jobs:
           exit 1
       - name: Persist last successful Daily Summary date
         if: ${{ always() }}
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           if [ -f .daily_summary_state.json ]; then
-            value=$(python -c "import json; print(json.load(open('.daily_summary_state.json', encoding='utf-8'))['last_reported_date'])")
-            gh variable set DAILY_LAST_REPORTED_DATE --body "$value"
+            cp .daily_summary_state.json "$RUNNER_TEMP/daily-state.json"
+            git config user.name github-actions[bot]
+            git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+            git fetch --no-tags --depth=1 origin state-daily
+            git checkout --detach --force FETCH_HEAD
+            cp "$RUNNER_TEMP/daily-state.json" .daily_summary_state.json
+            git add -f .daily_summary_state.json
+            if ! git diff --cached --quiet; then
+              git commit -m "Update Daily Summary state"
+              git push origin HEAD:state-daily
+            fi
           fi

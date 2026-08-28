@@ -7,8 +7,7 @@ on:
     - cron: "10 0-14 * * *"
 
 permissions:
-  actions: write
-  contents: read
+  contents: write
 
 concurrency:
   group: discord-suggestions-report
@@ -33,9 +32,11 @@ jobs:
           mkdir -p .runtime
           printf '%s' "$CONFIG_B64" | base64 --decode > .runtime/suggestions.env
           chmod 600 .runtime/suggestions.env
+      - name: Restore last successful Suggestions boundary
+        run: |
+          git fetch --no-tags --depth=1 origin state-suggestions
+          git show FETCH_HEAD:.suggestions_report_state.json > .suggestions_report_state.json
       - name: Analyze Suggestions
-        env:
-          SUGGESTIONS_LAST_END_UTC: ${{ vars.SUGGESTIONS_LAST_END_UTC }}
         run: |
           for attempt in 1 2 3; do
             python suggestions_report.py --env-file .runtime/suggestions.env --mode once && exit 0
@@ -44,10 +45,17 @@ jobs:
           exit 1
       - name: Persist last successful Suggestions boundary
         if: ${{ always() }}
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           if [ -f .suggestions_report_state.json ]; then
-            value=$(python -c "import json; print(json.load(open('.suggestions_report_state.json', encoding='utf-8'))['last_report_end_utc'])")
-            gh variable set SUGGESTIONS_LAST_END_UTC --body "$value"
+            cp .suggestions_report_state.json "$RUNNER_TEMP/suggestions-state.json"
+            git config user.name github-actions[bot]
+            git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+            git fetch --no-tags --depth=1 origin state-suggestions
+            git checkout --detach --force FETCH_HEAD
+            cp "$RUNNER_TEMP/suggestions-state.json" .suggestions_report_state.json
+            git add -f .suggestions_report_state.json
+            if ! git diff --cached --quiet; then
+              git commit -m "Update Suggestions report state"
+              git push origin HEAD:state-suggestions
+            fi
           fi

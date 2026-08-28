@@ -4,8 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  actions: write
-  contents: read
+  contents: write
 
 jobs:
   check:
@@ -42,7 +41,16 @@ jobs:
           python language_channels_report.py --env-file .runtime/language.env --check-config
           python daily_summary.py --env-file .runtime/daily.env --check-config
           python -m unittest discover -s tests -v
-      - name: Verify state persistence permission
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh variable set DEPLOYMENT_CHECK_STATE --body "$GITHUB_SHA"
+      - name: Verify state branch persistence
+        run: |
+          printf '%s\n' "$GITHUB_SHA" > "$RUNNER_TEMP/deployment-check-state"
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git fetch --no-tags --depth=1 origin state-check
+          git checkout --detach --force FETCH_HEAD
+          cp "$RUNNER_TEMP/deployment-check-state" .deployment_check_state
+          git add -f .deployment_check_state
+          if ! git diff --cached --quiet; then
+            git commit -m "Verify deployment state persistence"
+            git push origin HEAD:state-check
+          fi

@@ -7,8 +7,7 @@ on:
     - cron: "10,30,50 * * * *"
 
 permissions:
-  actions: write
-  contents: read
+  contents: write
 
 concurrency:
   group: discord-bug-monitor
@@ -33,9 +32,12 @@ jobs:
           mkdir -p .runtime
           printf '%s' "$CONFIG_B64" | base64 --decode > .runtime/bug.env
           chmod 600 .runtime/bug.env
+      - name: Restore last successful Bug check
+        run: |
+          git fetch --no-tags --depth=1 origin state-bug
+          git show FETCH_HEAD:.bug_report_state.json > .bug_report_state.json
       - name: Check new Bugs
         env:
-          BUG_LAST_CHECKED_AT_UTC: ${{ vars.BUG_LAST_CHECKED_AT_UTC }}
           BUG_STATELESS_LOOKBACK_MINUTES: "10080"
         run: |
           for attempt in 1 2 3; do
@@ -45,10 +47,17 @@ jobs:
           exit 1
       - name: Persist last successful Bug check
         if: ${{ always() }}
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           if [ -f .bug_report_state.json ]; then
-            value=$(python -c "import json; print(json.load(open('.bug_report_state.json', encoding='utf-8'))['last_checked_at_utc'])")
-            gh variable set BUG_LAST_CHECKED_AT_UTC --body "$value"
+            cp .bug_report_state.json "$RUNNER_TEMP/bug-state.json"
+            git config user.name github-actions[bot]
+            git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+            git fetch --no-tags --depth=1 origin state-bug
+            git checkout --detach --force FETCH_HEAD
+            cp "$RUNNER_TEMP/bug-state.json" .bug_report_state.json
+            git add -f .bug_report_state.json
+            if ! git diff --cached --quiet; then
+              git commit -m "Update Bug monitor state"
+              git push origin HEAD:state-bug
+            fi
           fi
