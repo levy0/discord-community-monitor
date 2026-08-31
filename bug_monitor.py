@@ -625,8 +625,8 @@ def load_last_checked_at_utc(
     interval_minutes: int,
     state_path: Path = BUG_REPORT_STATE_PATH,
 ) -> datetime:
-    # GitHub-hosted runners use an ephemeral filesystem. The workflow persists
-    # this value in a GitHub Actions variable and injects it on the next run.
+    # GitHub-hosted runners use an ephemeral filesystem. The workflow restores
+    # this value from the dedicated state branch before each run.
     # A wide overlap remains as the emergency fallback; Lark Source Message ID
     # is still the source of truth and prevents duplicate Bug records/notices.
     stateless_lookback_minutes = max(
