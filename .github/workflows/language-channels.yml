@@ -2,10 +2,6 @@ name: General and Language Channels Report
 
 on:
   workflow_dispatch:
-  schedule:
-    # Redundant off-peak wakeups from Beijing 08:02 through 22:57. The persisted
-    # boundary guarantees each due hourly window is reported at most once.
-    - cron: "2,7,12,17,22,27,32,37,42,47,52,57 0-14 * * *"
 
 permissions:
   contents: write
