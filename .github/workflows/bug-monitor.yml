@@ -3,8 +3,9 @@ name: Bug Monitor
 on:
   workflow_dispatch:
   schedule:
-    # Run every 20 minutes away from the top-of-hour load peak.
-    - cron: "10,30,50 * * * *"
+    # GitHub cron can be delayed or dropped. Wake redundantly every five minutes,
+    # while bug_monitor.py keeps the actual business check interval at 20 minutes.
+    - cron: "2,7,12,17,22,27,32,37,42,47,52,57 * * * *"
 
 permissions:
   contents: write
@@ -39,6 +40,7 @@ jobs:
       - name: Check new Bugs
         env:
           BUG_STATELESS_LOOKBACK_MINUTES: "10080"
+          BUG_ENFORCE_CHECK_INTERVAL: "true"
         run: |
           for attempt in 1 2 3; do
             python bug_monitor.py --env-file .runtime/bug.env --mode once && exit 0

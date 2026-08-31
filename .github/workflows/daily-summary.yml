@@ -3,8 +3,9 @@ name: Daily Summary
 on:
   workflow_dispatch:
   schedule:
-    # UTC 10:10 = Beijing 18:10; report boundary stays at 18:00.
-    - cron: "10 10 * * *"
+    # Redundant wakeups from Beijing 18:02 through 22:57. The program waits until
+    # 18:10, preserves the exact 18:00 boundary, and sends each date only once.
+    - cron: "2,7,12,17,22,27,32,37,42,47,52,57 10-14 * * *"
 
 permissions:
   contents: write

@@ -756,24 +756,28 @@ def latest_due_end_utc(cfg: Config, now_local: datetime | None = None) -> dateti
     tz = ZoneInfo(cfg.local_timezone)
     current = now_local or datetime.now(tz)
     current = current.astimezone(tz)
-    start_today = current.replace(
+    # GitHub 的冗余唤醒会在一个小时内执行多次。只有整点过去
+    # REPORT_DELAY_MINUTES 后才认为该整点窗口到期，避免 08:05/18:05
+    # 之类的提前唤醒过早推送。
+    effective_current = current - timedelta(minutes=REPORT_DELAY_MINUTES)
+    start_today = effective_current.replace(
         hour=cfg.schedule_start_hour,
         minute=0,
         second=0,
         microsecond=0,
     )
-    end_today = current.replace(
+    end_today = effective_current.replace(
         hour=cfg.schedule_end_hour,
         minute=0,
         second=0,
         microsecond=0,
     )
-    if current < start_today:
+    if effective_current < start_today:
         end_local = end_today - timedelta(days=1)
-    elif current >= end_today:
+    elif effective_current >= end_today:
         end_local = end_today
     else:
-        end_local = current.replace(minute=0, second=0, microsecond=0)
+        end_local = effective_current.replace(minute=0, second=0, microsecond=0)
     return end_local.astimezone(timezone.utc)
 
 

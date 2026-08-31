@@ -689,6 +689,16 @@ def save_last_checked_at_utc(
         logger.error("保存上次成功检查时间失败，下次查询范围将使用旧起点: %s", exc)
 
 
+def check_interval_elapsed(
+    *,
+    last_checked_at_utc: datetime,
+    now_utc: datetime,
+    interval_minutes: int,
+) -> bool:
+    """冗余云端唤醒时，仅允许达到业务检查间隔的任务继续执行。"""
+    return now_utc - last_checked_at_utc >= timedelta(minutes=interval_minutes)
+
+
 def reports_created_in_window(
     records: Sequence[DiscordRecord],
     *,
@@ -1296,6 +1306,21 @@ class Pipeline:
             now_utc=now_utc,
             interval_minutes=self.cfg.check_interval_minutes,
         )
+        if env_bool("BUG_ENFORCE_CHECK_INTERVAL", False) and not check_interval_elapsed(
+            last_checked_at_utc=range_start_utc,
+            now_utc=now_utc,
+            interval_minutes=self.cfg.check_interval_minutes,
+        ):
+            elapsed_minutes = max(
+                0,
+                int((now_utc - range_start_utc).total_seconds() // 60),
+            )
+            logger.info(
+                "距离上次成功检查仅 %d 分钟，未达到 %d 分钟业务间隔；本次冗余唤醒跳过",
+                elapsed_minutes,
+                self.cfg.check_interval_minutes,
+            )
+            return
 
         logger.info("[1/6] 抓取 Discord")
         raw_records = asyncio.run(fetch_discord_records(self.cfg))

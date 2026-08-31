@@ -53,6 +53,7 @@ WINDOWS_MUTEX_NAME = r"Local\DMG_Discord_Daily_Summary_Scheduler"
 _schedule_mutex_handle: int | None = None
 DAILY_STATE_PATH = Path(__file__).with_name(".daily_summary_state.json")
 LAST_REPORTED_DATE_ENV_NAME = "DAILY_LAST_REPORTED_DATE"
+DAILY_REPORT_DELAY_MINUTES = 10
 
 
 def acquire_schedule_mutex() -> bool:
@@ -921,9 +922,14 @@ def latest_due_report_date(
     tz = ZoneInfo(cfg.local_timezone)
     current = now_local or datetime.now(tz)
     current = current.astimezone(tz)
+    effective_current = current - timedelta(minutes=DAILY_REPORT_DELAY_MINUTES)
     schedule_clock = datetime.strptime(cfg.daily_schedule_time, "%H:%M").time()
-    today_schedule = datetime.combine(current.date(), schedule_clock, tzinfo=tz)
-    return current.date() if current >= today_schedule else current.date() - timedelta(days=1)
+    today_schedule = datetime.combine(effective_current.date(), schedule_clock, tzinfo=tz)
+    return (
+        effective_current.date()
+        if effective_current >= today_schedule
+        else effective_current.date() - timedelta(days=1)
+    )
 
 
 def pending_report_dates(

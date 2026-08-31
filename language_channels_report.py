@@ -887,24 +887,27 @@ def latest_due_end_utc(cfg: Config, now_local: datetime | None = None) -> dateti
     tz = ZoneInfo(cfg.local_timezone)
     current = now_local or datetime.now(tz)
     current = current.astimezone(tz)
-    start_today = current.replace(
+    # 冗余云端唤醒可以早于正式上报点；减去延迟后再判断到期边界，
+    # 保证 08:00～22:00 的整点窗口至少在整点后 10 分钟才会发送。
+    effective_current = current - timedelta(minutes=REPORT_DELAY_MINUTES)
+    start_today = effective_current.replace(
         hour=cfg.schedule_start_hour,
         minute=0,
         second=0,
         microsecond=0,
     )
-    end_today = current.replace(
+    end_today = effective_current.replace(
         hour=cfg.schedule_end_hour,
         minute=0,
         second=0,
         microsecond=0,
     )
-    if current < start_today:
+    if effective_current < start_today:
         end_local = end_today - timedelta(days=1)
-    elif current >= end_today:
+    elif effective_current >= end_today:
         end_local = end_today
     else:
-        end_local = current.replace(minute=0, second=0, microsecond=0)
+        end_local = effective_current.replace(minute=0, second=0, microsecond=0)
     return end_local.astimezone(timezone.utc)
 
 

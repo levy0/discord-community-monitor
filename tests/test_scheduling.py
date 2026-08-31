@@ -62,6 +62,23 @@ class HourlyWindowTests(unittest.TestCase):
                     expected,
                 )
 
+    def test_redundant_wakeup_waits_until_ten_minutes_after_hour(self):
+        cases = (
+            (datetime(2026, 8, 28, 8, 7, tzinfo=LOCAL_TZ), "2026-08-27 22:00"),
+            (datetime(2026, 8, 28, 8, 12, tzinfo=LOCAL_TZ), "2026-08-28 08:00"),
+            (datetime(2026, 8, 28, 18, 7, tzinfo=LOCAL_TZ), "2026-08-28 17:00"),
+            (datetime(2026, 8, 28, 18, 12, tzinfo=LOCAL_TZ), "2026-08-28 18:00"),
+            (datetime(2026, 8, 28, 22, 7, tzinfo=LOCAL_TZ), "2026-08-28 21:00"),
+            (datetime(2026, 8, 28, 22, 12, tzinfo=LOCAL_TZ), "2026-08-28 22:00"),
+        )
+        for module in (suggestions_report, language_channels_report):
+            for current, expected in cases:
+                actual = module.latest_due_end_utc(HOURLY_CFG, current)
+                self.assertEqual(
+                    actual.astimezone(LOCAL_TZ).strftime("%Y-%m-%d %H:%M"),
+                    expected,
+                )
+
     def test_catch_up_starts_from_persisted_boundary(self):
         with patch.dict(
             os.environ,
@@ -104,8 +121,37 @@ class DailyWindowTests(unittest.TestCase):
             ["2026-08-27", "2026-08-28"],
         )
 
+    def test_daily_summary_waits_until_1810(self):
+        before_delay = daily_summary.latest_due_report_date(
+            DAILY_CFG,
+            datetime(2026, 8, 28, 18, 7, tzinfo=LOCAL_TZ),
+        )
+        after_delay = daily_summary.latest_due_report_date(
+            DAILY_CFG,
+            datetime(2026, 8, 28, 18, 12, tzinfo=LOCAL_TZ),
+        )
+        self.assertEqual(str(before_delay), "2026-08-27")
+        self.assertEqual(str(after_delay), "2026-08-28")
+
 
 class BugStateTests(unittest.TestCase):
+    def test_redundant_bug_wakeup_preserves_twenty_minute_interval(self):
+        last_checked = datetime(2026, 8, 28, 12, 0, tzinfo=timezone.utc)
+        self.assertFalse(
+            bug_monitor.check_interval_elapsed(
+                last_checked_at_utc=last_checked,
+                now_utc=last_checked + timedelta(minutes=19, seconds=59),
+                interval_minutes=20,
+            )
+        )
+        self.assertTrue(
+            bug_monitor.check_interval_elapsed(
+                last_checked_at_utc=last_checked,
+                now_utc=last_checked + timedelta(minutes=20),
+                interval_minutes=20,
+            )
+        )
+
     def test_github_variable_is_used_when_runner_has_no_state_file(self):
         now_utc = datetime(2026, 8, 28, 12, 0, tzinfo=timezone.utc)
         expected = now_utc - timedelta(hours=5)
